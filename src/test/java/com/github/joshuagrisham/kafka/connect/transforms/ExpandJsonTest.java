@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.kafka.connect.data.Schema;
@@ -242,6 +243,68 @@ public class ExpandJsonTest {
         // Schema must be properly inferred from the actual JSON, not left as OPTIONAL_STRING_SCHEMA
         assertEquals(STRUCT_WITH_JSON_STRUCT_SCHEMA, transformed.valueSchema());
         assertEquals(STRUCT_WITH_JSON_STRUCT_VALUE, transformed.value());
+    }
+
+    private SourceRecord recordWithJson(String json) {
+        Struct input = new Struct(STRUCT_WITH_JSON_STRING_SCHEMA)
+            .put("jsonValue", json)
+            .put("numberValue", 42)
+            .put("booleanValue", true);
+        return new SourceRecord(null, null, "topic", 0, null, null, STRUCT_WITH_JSON_STRING_SCHEMA, input);
+    }
+
+    @Test
+    public void emptyJsonArrayDoesNotPolluteSchemaCacheForSubsequentRecords() {
+        xformValue.configure(Map.of(ConfigName.FIELDS, "jsonValue"));
+
+        // First record: an empty array carries no information about its element type, so the schema must not be cached
+        SourceRecord empty = xformValue.apply(recordWithJson("[]"));
+        Schema emptyFieldSchema = empty.valueSchema().field("jsonValue").schema();
+        assertEquals(Schema.Type.ARRAY, emptyFieldSchema.type());
+        assertEquals(List.of(), ((Struct) empty.value()).get("jsonValue"));
+
+        // Second record: same input schema, but now the array has objects in it
+        SourceRecord populated = xformValue.apply(recordWithJson("[{\"name\": \"a\", \"ask\": \"1\"}]"));
+        Schema populatedFieldSchema = populated.valueSchema().field("jsonValue").schema();
+        assertEquals(Schema.Type.ARRAY, populatedFieldSchema.type());
+        assertEquals(Schema.Type.STRUCT, populatedFieldSchema.valueSchema().type());
+        List<?> populatedItems = (List<?>) ((Struct) populated.value()).get("jsonValue");
+        assertEquals("a", ((Struct) populatedItems.get(0)).get("name"));
+
+        // Third record: an empty array again, now the (cached) schema from the populated record must be used
+        SourceRecord emptyAgain = xformValue.apply(recordWithJson("[]"));
+        assertEquals(populated.valueSchema(), emptyAgain.valueSchema());
+        assertEquals(List.of(), ((Struct) emptyAgain.value()).get("jsonValue"));
+
+        // Fourth record: populated again
+        SourceRecord populatedAgain = xformValue.apply(recordWithJson("[{\"name\": \"b\", \"ask\": \"2\"}]"));
+        assertEquals(populated.valueSchema(), populatedAgain.valueSchema());
+    }
+
+    @Test
+    public void emptyJsonObjectDoesNotPolluteSchemaCacheForSubsequentRecords() {
+        xformValue.configure(Map.of(ConfigName.FIELDS, "jsonValue"));
+
+        xformValue.apply(recordWithJson("{}"));
+        SourceRecord populated = xformValue.apply(recordWithJson("{\"name\": \"a\"}"));
+
+        Schema fieldSchema = populated.valueSchema().field("jsonValue").schema();
+        assertEquals("a", ((Struct) ((Struct) populated.value()).get("jsonValue")).get("name"));
+        assertEquals(Schema.Type.STRING, fieldSchema.field("name").schema().type());
+    }
+
+    @Test
+    public void nullNestedInJsonDoesNotPolluteSchemaCacheForSubsequentRecords() {
+        xformValue.configure(Map.of(ConfigName.FIELDS, "jsonValue"));
+
+        // The type of "ask" cannot be inferred from a null, so this schema must not be cached either
+        xformValue.apply(recordWithJson("[{\"name\": \"a\", \"ask\": null}]"));
+        SourceRecord populated = xformValue.apply(recordWithJson("[{\"name\": \"b\", \"ask\": 5}]"));
+
+        Schema itemSchema = populated.valueSchema().field("jsonValue").schema().valueSchema();
+        assertEquals(Schema.Type.INT32, itemSchema.field("ask").schema().type());
+        List<?> items = (List<?>) ((Struct) populated.value()).get("jsonValue");
+        assertEquals(5, ((Struct) items.get(0)).get("ask"));
     }
 
 }

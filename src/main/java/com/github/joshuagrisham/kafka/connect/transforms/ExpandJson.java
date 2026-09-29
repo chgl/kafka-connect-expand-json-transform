@@ -139,16 +139,18 @@ public abstract class ExpandJson<R extends ConnectRecord<R>> implements Transfor
             return updatedSchema;
 
         final SchemaBuilder builder = SchemaUtil.copySchemaBasics(currentSchema, SchemaBuilder.struct());
-        boolean hasNullJsonField = false;
+        boolean schemaHasGuesses = false;
         for (Field field : currentSchema.fields()) {
             if (fields.contains(field.name())) {
                 Object jsonFieldValue = currentValue.get(field.name());
                 if (jsonFieldValue == null) {
-                    hasNullJsonField = true;
+                    schemaHasGuesses = true;
                     builder.field(field.name(), Schema.OPTIONAL_STRING_SCHEMA);
                 } else {
+                    JsonNode jsonFieldNode = parseJson(jsonFieldValue);
+                    schemaHasGuesses |= hasGuessedTypes(jsonFieldNode);
                     SchemaAndValue newSchemaAndValue = JSONCONVERTER.toConnectData(topic,
-                        getInferredEnvelopeValue(jsonFieldValue)); // inferring envelope schema+value here as KIP-301 is not yet implemented
+                        getInferredEnvelopeValue(jsonFieldNode)); // inferring envelope schema+value here as KIP-301 is not yet implemented
                     builder.field(field.name(), newSchemaAndValue.schema());
                 }
             } else {
@@ -160,9 +162,9 @@ public abstract class ExpandJson<R extends ConnectRecord<R>> implements Transfor
             builder.optional();
 
         updatedSchema = builder.build();
-        // Do not cache schemas built from null values so the schema is re-inferred
-        // once a non-null value is available, producing the correct field types.
-        if (!hasNullJsonField) {
+        // Do not cache schemas where some types had to be guessed (null values, empty arrays or objects) so the
+        // schema is re-inferred once a record with actual data is available, producing the correct field types.
+        if (!schemaHasGuesses) {
             schemaUpdateCache.put(currentSchema, updatedSchema);
         }
         return updatedSchema;
@@ -178,13 +180,18 @@ public abstract class ExpandJson<R extends ConnectRecord<R>> implements Transfor
     // JsonConverter requires an "enveloped" payload (schema+payload); we will create one using a version of the inferSchema()
     // from the KIP-301 proposal
     private byte[] getInferredEnvelopeValue(Object value) {
+        return getInferredEnvelopeValue(parseJson(value));
+    }
 
-        JsonNode valueJson;
+    private JsonNode parseJson(Object value) {
         try {
-            valueJson = MAPPER.readTree(value.toString());
+            return MAPPER.readTree(value.toString());
         } catch (JsonProcessingException e) {
             throw new DataException("Exception when attempting to parse value as JSON", e);
         }
+    }
+
+    private byte[] getInferredEnvelopeValue(JsonNode valueJson) {
 
         Schema inferredSchema = inferSchema(valueJson);
         ObjectNode inferredSchemaJson = JSONCONVERTER.asJsonSchema(inferredSchema);
@@ -198,6 +205,32 @@ public abstract class ExpandJson<R extends ConnectRecord<R>> implements Transfor
         // Now envelopedValue is a proper JsonSchema-formatted payload that the current implementation of JsonConverter can use
         return envelopedValue;
 
+    }
+
+    // True if inferSchema() has to guess some type for this JSON because the value itself does not tell (null, empty array,
+    // empty object), so the inferred schema may turn out wrong for a later record. Follows the same traversal as inferSchema(),
+    // which only looks at the first element of an array.
+    private static boolean hasGuessedTypes(JsonNode jsonValue) {
+        switch (jsonValue.getNodeType()) {
+            case NULL:
+                return true;
+
+            case ARRAY:
+                Iterator<JsonNode> elements = jsonValue.elements();
+                return !elements.hasNext() || hasGuessedTypes(elements.next());
+
+            case OBJECT:
+                if (jsonValue.isEmpty())
+                    return true;
+                for (JsonNode child : jsonValue) {
+                    if (hasGuessedTypes(child))
+                        return true;
+                }
+                return false;
+
+            default:
+                return false;
+        }
     }
 
     // copy of inferSchema() from the KIP-301 proposal but slightly adjusted as follows:
