@@ -5,7 +5,8 @@ Kafka Connect Single Message Transform (SMT) to parse JSON objects from given so
 ## Compatibility
 
 - Use `0.0.x` versions if you need compatibility with Kafka 3.x and Java 11.
-- Use `0.1.x` versions if you need compatibility with Kafka 4.x and Java 17.
+- Use `0.1.x` versions if you need compatibility with Kafka 4.0 and Java 17.
+- Use `0.2.x` versions if you need compatibility with Kafka 4.2 and Java 21.
 - See [Releases](https://github.com/joshuagrisham/kafka-connect-expand-json-transform/releases) for the latest releases.
 
 ## Background
